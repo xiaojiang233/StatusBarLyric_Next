@@ -524,6 +524,13 @@ class Config {
         set(value) {
             config.put("automateFocusedNotice", value)
         }
+    var blockNeteaseMediaIsland: Boolean
+        get() {
+            return config.opt("blockNeteaseMediaIsland", false)
+        }
+        set(value) {
+            config.put("blockNeteaseMediaIsland", value)
+        }
 
     var pageRatio: Float
         get() {
