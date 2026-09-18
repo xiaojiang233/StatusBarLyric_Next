@@ -66,6 +66,7 @@ import statusbar.lyric.view.LyricSwitchView
 import statusbar.lyric.view.TitleDialog
 import java.io.File
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -91,6 +92,7 @@ class Api101SystemUIHook(
     private val touchHookInstalled = AtomicBoolean(false)
     private val xiaomiHooksInstalled = AtomicBoolean(false)
     private val focusNotificationHookInstalled = AtomicBoolean(false)
+    private val blockNeteaseMediaIslandHookInstalled = AtomicBoolean(false)
     private val systemUiTest = Api101SystemUITest(module)
     private val lyricDisplayState = Api101LyricDisplayState()
 
@@ -209,6 +211,7 @@ class Api101SystemUIHook(
         registerTouchHook(classLoader)
         registerXiaomiHooks(classLoader)
         registerFocusNotificationHook(classLoader)
+        registerBlockNeteaseMediaIslandHook(context, classLoader)
         registerTargetViewHook(context, classLoader)
         registerConfigReceiver(context)
         registerScreenReceiver(context)
@@ -522,6 +525,144 @@ class Api101SystemUIHook(
         }.onFailure { throwable ->
             focusNotificationHookInstalled.set(false)
             module.log(android.util.Log.INFO, TAG, "API101 focused notification hook unavailable", throwable)
+        }
+    }
+
+    private fun registerBlockNeteaseMediaIslandHook(context: Context, classLoader: ClassLoader) {
+        if (!blockNeteaseMediaIslandHookInstalled.compareAndSet(false, true)) return
+        if (!XposedOwnSP.config.blockNeteaseMediaIsland) {
+            blockNeteaseMediaIslandHookInstalled.set(false)
+            return
+        }
+        if (!(isXiaomi && isHyperOS && context.packageName == SYSTEM_UI_PACKAGE_NAME)) {
+            blockNeteaseMediaIslandHookInstalled.set(false)
+            return
+        }
+        runCatching {
+            val targetClass = classLoader.loadClass(MIUI_ISLAND_MEDIA_CONTROLLER_IMPL_CLASS)
+            val methods = findMethodsByName(targetClass, ADD_DYNAMIC_ISLAND_VIEW_METHOD)
+            if (methods.isEmpty()) {
+                module.log(
+                    android.util.Log.INFO,
+                    TAG,
+                    "API101 HyperOS media island hook skipped: $ADD_DYNAMIC_ISLAND_VIEW_METHOD not found"
+                )
+                blockNeteaseMediaIslandHookInstalled.set(false)
+                return@runCatching
+            }
+            methods.forEach { method ->
+                runCatching {
+                    module.hook(method)
+                        .setPriority(XposedInterface.PRIORITY_DEFAULT)
+                        .intercept(BlockNeteaseMediaIslandHooker(this, method))
+                }.onFailure { throwable ->
+                    module.log(android.util.Log.INFO, TAG, "API101 HyperOS media island hook unavailable", throwable)
+                }
+            }
+        }.onFailure { throwable ->
+            blockNeteaseMediaIslandHookInstalled.set(false)
+            module.log(android.util.Log.INFO, TAG, "API101 HyperOS media island class unavailable", throwable)
+        }
+    }
+
+    private fun shouldBlockNeteaseMediaIsland(chain: XposedInterface.Chain, method: Method): Boolean {
+        if (!XposedOwnSP.config.blockNeteaseMediaIsland || !isXiaomi || !isHyperOS) return false
+        return runCatching {
+            method.parameterTypes.indices.firstNotNullOfOrNull { index ->
+                val arg = chain.getArg(index)
+                if (arg is String) {
+                    arg.takeIf { it.isNotBlank() }
+                } else {
+                    resolvePackageName(arg, HashSet())
+                }
+            } == NETEASE_CLOUD_MUSIC_PACKAGE
+        }.getOrElse { throwable ->
+            module.log(android.util.Log.INFO, TAG, "API101 HyperOS media island package parse failed", throwable)
+            false
+        }
+    }
+
+    private fun resolvePackageName(candidate: Any?, visited: MutableSet<Int>, depth: Int = 0): String? {
+        if (candidate == null || depth > MAX_PACKAGE_PARSE_DEPTH) return null
+        val identity = System.identityHashCode(candidate)
+        if (!visited.add(identity)) return null
+        return runCatching {
+            readPackageNameField(candidate)
+                ?: readPackageNameGetter(candidate)
+                ?: when (candidate) {
+                    is Array<*> -> candidate.firstNotNullOfOrNull { resolvePackageName(it, visited, depth + 1) }
+                    is Iterable<*> -> candidate.firstNotNullOfOrNull { resolvePackageName(it, visited, depth + 1) }
+                    is Map<*, *> -> candidate.values.firstNotNullOfOrNull {
+                        resolvePackageName(it, visited, depth + 1)
+                    }
+                    else -> reflectMemberValues(candidate).firstNotNullOfOrNull {
+                        resolvePackageName(it, visited, depth + 1)
+                    }
+                }
+        }.getOrNull()
+    }
+
+    private fun readPackageNameField(candidate: Any): String? {
+        var current: Class<*>? = candidate.javaClass
+        while (current != null && current != Any::class.java) {
+            val value = runCatching {
+                current.declaredFields.firstOrNull { it.name == PACKAGE_NAME_FIELD }?.let { field ->
+                    field.isAccessible = true
+                    field.get(candidate) as? String
+                }
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+            if (value != null) return value
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun readPackageNameGetter(candidate: Any): String? {
+        var current: Class<*>? = candidate.javaClass
+        while (current != null && current != Any::class.java) {
+            val value = runCatching {
+                current.declaredMethods.firstOrNull {
+                    it.name == GET_PACKAGE_NAME_METHOD && it.parameterCount == 0
+                }?.let { method ->
+                    method.isAccessible = true
+                    method.invoke(candidate) as? String
+                }
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+            if (value != null) return value
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun reflectMemberValues(candidate: Any): Sequence<Any?> {
+        return sequence {
+            var current: Class<*>? = candidate.javaClass
+            while (current != null && current != Any::class.java) {
+                current.declaredFields.forEach { field ->
+                    if (Modifier.isStatic(field.modifiers)) return@forEach
+                    runCatching {
+                        field.isAccessible = true
+                        field.get(candidate)
+                    }.getOrNull()?.let { yield(it) }
+                }
+                current = current.superclass
+            }
+        }
+    }
+
+    private fun safeDefaultReturn(returnType: Class<*>): Any? {
+        if (returnType == Void.TYPE) return null
+        if (!returnType.isPrimitive) return null
+        return when (returnType) {
+            Boolean::class.javaPrimitiveType -> false
+            Byte::class.javaPrimitiveType -> 0.toByte()
+            Char::class.javaPrimitiveType -> 0.toChar()
+            Short::class.javaPrimitiveType -> 0.toShort()
+            Int::class.javaPrimitiveType -> 0
+            Long::class.javaPrimitiveType -> 0L
+            Float::class.javaPrimitiveType -> 0f
+            Double::class.javaPrimitiveType -> 0.0
+            else -> null
         }
     }
 
@@ -1109,6 +1250,18 @@ class Api101SystemUIHook(
         return null
     }
 
+    private fun findMethodsByName(clazz: Class<*>, name: String): List<Method> {
+        val methods = mutableListOf<Method>()
+        var current: Class<*>? = clazz
+        while (current != null) {
+            methods += current.declaredMethods.filter { it.name == name && !it.isBridge }
+            current = current.superclass
+        }
+        return methods.distinctBy { method ->
+            method.declaringClass.name + method.name + method.parameterTypes.joinToString { it.name }
+        }
+    }
+
     private fun findMethodByName(clazz: Class<*>, name: String): Method? {
         var current: Class<*>? = clazz
         while (current != null) {
@@ -1289,6 +1442,26 @@ class Api101SystemUIHook(
         }
     }
 
+    private class BlockNeteaseMediaIslandHooker(
+        private val owner: Api101SystemUIHook,
+        private val targetMethod: Method
+    ) : XposedInterface.Hooker {
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            return runCatching {
+                if (!owner.shouldBlockNeteaseMediaIsland(chain, targetMethod)) return@runCatching chain.proceed()
+                owner.module.log(
+                    android.util.Log.INFO,
+                    TAG,
+                    "Blocked HyperOS media island for $NETEASE_CLOUD_MUSIC_PACKAGE"
+                )
+                owner.safeDefaultReturn(targetMethod.returnType)
+            }.getOrElse { throwable ->
+                owner.module.log(android.util.Log.INFO, TAG, "API101 HyperOS media island intercept failed", throwable)
+                chain.proceed()
+            }
+        }
+    }
+
     private data class TargetMatch(
         val parent: ViewGroup,
         val index: Int
@@ -1322,5 +1495,13 @@ class Api101SystemUIHook(
         const val MAX_ICON_BYTES = 524_288
         const val LONG_CLICK_MILLIS = 500L
         const val TOUCH_MOVE_THRESHOLD = 50f
+        const val SYSTEM_UI_PACKAGE_NAME = "com.android.systemui"
+        const val MIUI_ISLAND_MEDIA_CONTROLLER_IMPL_CLASS =
+            "com.android.systemui.statusbar.notification.mediaisland.MiuiIslandMediaControllerImpl"
+        const val ADD_DYNAMIC_ISLAND_VIEW_METHOD = "addDynamicIslandView"
+        const val PACKAGE_NAME_FIELD = "packageName"
+        const val GET_PACKAGE_NAME_METHOD = "getPackageName"
+        const val NETEASE_CLOUD_MUSIC_PACKAGE = "com.netease.cloudmusic"
+        const val MAX_PACKAGE_PARSE_DEPTH = 6
     }
 }

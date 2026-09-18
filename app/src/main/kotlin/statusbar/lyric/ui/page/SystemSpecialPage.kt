@@ -99,6 +99,7 @@ fun SystemSpecialPage(
     val mHyperOSTextureCorner = remember { mutableStateOf(config.mHyperOSTextureCorner) }
     val mHyperOSTextureBgColor = remember { mutableStateOf(config.mHyperOSTextureBgColor) }
     val mAutomateFocusedNotice = remember { mutableStateOf(config.automateFocusedNotice) }
+    val blockNeteaseMediaIsland = remember { mutableStateOf(config.blockNeteaseMediaIsland) }
     val showDialog = remember { mutableStateOf(false) }
     val showRadioDialog = remember { mutableStateOf(false) }
     val showCornerDialog = remember { mutableStateOf(false) }
@@ -216,6 +217,14 @@ fun SystemSpecialPage(
                             onCheckedChange = {
                                 mAutomateFocusedNotice.value = it
                                 config.automateFocusedNotice = it
+                            }
+                        )
+                        SuperSwitch(
+                            title = stringResource(R.string.block_netease_media_island),
+                            checked = blockNeteaseMediaIsland.value,
+                            onCheckedChange = {
+                                blockNeteaseMediaIsland.value = it
+                                config.blockNeteaseMediaIsland = it
                             }
                         )
                         SuperSwitch(
