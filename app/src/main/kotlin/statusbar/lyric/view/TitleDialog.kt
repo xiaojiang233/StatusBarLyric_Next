@@ -106,7 +106,12 @@ class TitleDialog(context: Context) : Dialog(context) {
                     height = dp2px(context, 15f)
                     setMargins(0, 0, 15, 0)
                 }
-            setImageDrawable(context.getDrawable(R.drawable.ic_song))
+            runCatching {
+                context.createPackageContext("statusbar.lyric", Context.CONTEXT_IGNORE_SECURITY)
+                    .getDrawable(R.drawable.ic_song)
+            }.onSuccess {
+                setImageDrawable(it)
+            }
         }
     }
     private var content: LinearLayout = LinearLayout(context).apply {
